@@ -1,0 +1,32 @@
+# ChartLab MT5 bridge. Run on the Windows machine where MT5 is open and logged in.
+#   pip install fastapi uvicorn MetaTrader5
+#   set CHARTLAB_TOKEN=pick-a-long-secret
+#   python server.py
+import os, MetaTrader5 as mt5, uvicorn
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+TOKEN = os.environ.get("CHARTLAB_TOKEN", "")
+TF = {60: mt5.TIMEFRAME_M1, 300: mt5.TIMEFRAME_M5, 900: mt5.TIMEFRAME_M15,
+      3600: mt5.TIMEFRAME_H1, 14400: mt5.TIMEFRAME_H4, 86400: mt5.TIMEFRAME_D1}
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+if not mt5.initialize():
+    raise SystemExit(f"MT5 not available: {mt5.last_error()} (open and log in to the terminal first)")
+
+@app.get("/candles")
+def candles(symbol: str, tf: int = 3600, n: int = 1000, x_token: str = Header(None)):
+    if not TOKEN or x_token != TOKEN:
+        raise HTTPException(401, "bad token")
+    if tf not in TF:
+        raise HTTPException(400, "unsupported timeframe")
+    mt5.symbol_select(symbol, True)
+    rates = mt5.copy_rates_from_pos(symbol, TF[tf], 0, min(n, 5000))
+    if rates is None or len(rates) == 0:
+        raise HTTPException(404, f"no data for {symbol}: {mt5.last_error()}")
+    # note: MT5 timestamps are broker server time
+    return [{"time": int(r["time"]), "open": float(r["open"]), "high": float(r["high"]),
+             "low": float(r["low"]), "close": float(r["close"]), "v": float(r["tick_volume"])} for r in rates]
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)

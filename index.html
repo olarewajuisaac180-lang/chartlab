@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ChartLab – charts, indicators and backtester</title>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root{--bg:#ffffff;--panel:#f4f5f7;--text:#1b1f24;--muted:#6b7280;--grid:#e5e7eb;--up:#16a34a;--down:#dc2626;--acc:#2962ff;--acc2:#f59e0b;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#131722;--panel:#1e222d;--text:#d1d4dc;--muted:#8a91a0;--grid:#2a2e39;--up:#26a69a;--down:#ef5350;--acc:#5b8cff;--acc2:#f5b942;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#131722;--panel:#1e222d;--text:#d1d4dc;--muted:#8a91a0;--grid:#2a2e39;--up:#26a69a;--down:#ef5350;--acc:#5b8cff;--acc2:#f5b942;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:end;padding:12px 14px;background:var(--panel);border-bottom:1px solid var(--grid)}
+h1{font-size:16px;margin:0 8px 0 0;align-self:center}
+label{display:flex;flex-direction:column;font-size:11px;color:var(--muted);gap:2px}
+select,input{background:var(--bg);color:var(--text);border:1px solid var(--grid);border-radius:6px;padding:6px 8px;font:inherit;min-width:70px;width:90px}
+select{width:auto}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
+main{padding:10px 14px;max-width:1300px;margin:0 auto}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px}
+.stat{background:var(--panel);border-radius:8px;padding:8px 10px}
+.stat b{display:block;font-size:17px}.stat span{font-size:11px;color:var(--muted)}
+.pos{color:var(--up)}.neg{color:var(--down)}
+.ch{position:relative;border:1px solid var(--grid);border-radius:8px;margin-bottom:8px;overflow:hidden}
+.ch .tag{position:absolute;top:6px;left:10px;z-index:3;font-size:11px;color:var(--muted);pointer-events:none}
+#price{height:380px}#rsi{height:110px}#eq{height:150px}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}th{color:var(--muted);font-weight:500}
+.note{font-size:12px;color:var(--muted);margin:8px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>ChartLab</h1>
+  <label>Source<select id="src"><option value="binance">Binance (live)</option><option value="mt5">MT5 bridge (live)</option><option value="sim">Simulated</option></select></label>
+  <label>Symbol<input id="symtxt" value="BTCUSDT"></label>
+  <label id="wurl" style="display:none">Backend URL<input id="url" style="width:210px" placeholder="https://xxxx.trycloudflare.com"></label>
+  <label id="wtok" style="display:none">Token<input id="tok" type="password"></label>
+  <label id="wsim" style="display:none">Sim symbol<select id="sym"><option value="11">BTC-SIM</option><option value="22">ETH-SIM</option><option value="33">GOLD-SIM</option><option value="44">NGN-SIM</option></select></label>
+  <label>Timeframe<select id="tf"><option value="60">1m</option><option value="300">5m</option><option value="900">15m</option><option value="3600">1H</option><option value="14400">4H</option><option value="86400" selected>1D</option></select></label>
+  <label>Strategy<select id="strat"><option value="sma">SMA crossover</option><option value="rsi">RSI mean reversion</option><option value="bb">Bollinger mean reversion</option></select></label>
+  <label><span id="l1">Fast</span><input id="p1" type="number" step="any"></label>
+  <label><span id="l2">Slow</span><input id="p2" type="number" step="any"></label>
+  <label id="w3"><span id="l3">Exit above</span><input id="p3" type="number" step="any"></label>
+  <label>Fee (bps)<input id="fee" type="number" value="10"></label>
+  <button id="run">Run</button>
+</header>
+<main>
+  <div class="stats" id="stats"></div>
+  <div class="ch"><div class="tag" id="ptag"></div><div id="price"></div></div>
+  <div class="ch"><div class="tag">RSI</div><div id="rsi"></div></div>
+  <div class="ch"><div class="tag">Equity vs buy &amp; hold</div><div id="eq"></div></div>
+  <div class="note">Live data: Binance public market data, or your own MT5 bridge. “Simulated” is a seeded random walk for testing. Orders fill at the next bar’s open, long-only, fully invested. Educational tool, not financial advice.</div>
+  <div class="tw"><table id="trades"></table></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const DEF={sma:{l:["Fast","Slow",null],v:[20,50,0]},rsi:{l:["RSI period","Buy below","Exit above"],v:[14,30,55]},bb:{l:["Period","Std dev",null],v:[20,2,0]}};
+function rng(s){return function(){s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function gen(seed,tf,n){
+  const r=rng(seed*1000+tf),gauss=()=>Math.sqrt(-2*Math.log(r()+1e-12))*Math.cos(2*Math.PI*r());
+  const start=Math.floor(Date.now()/1000/tf)*tf-n*tf, bars=[]; let p=100*(1+seed/10), reg=0;
+  const vol=0.012*Math.sqrt(tf/86400)+0.002;
+  for(let i=0;i<n;i++){
+    if(i%90===0)reg=(r()-0.45)*0.0025*Math.sqrt(tf/86400);
+    const o=p,c=o*Math.exp(reg+vol*gauss()),h=Math.max(o,c)*(1+Math.abs(gauss())*vol*0.4),l=Math.min(o,c)*(1-Math.abs(gauss())*vol*0.4);
+    bars.push({time:start+i*tf,open:o,high:h,low:l,close:c,v:Math.round(1000+r()*4000+Math.abs(c-o)/o*2e5)});p=c;
+  }return bars;
+}
+const sma=(a,n)=>a.map((_,i)=>i<n-1?null:a.slice(i-n+1,i+1).reduce((x,y)=>x+y,0)/n);
+function std(a,n){return a.map((_,i)=>{if(i<n-1)return null;const w=a.slice(i-n+1,i+1),m=w.reduce((x,y)=>x+y,0)/n;return Math.sqrt(w.reduce((x,y)=>x+(y-m)**2,0)/n)})}
+function rsi(a,n){const o=a.map(()=>null);let g=0,l=0;
+  for(let i=1;i<a.length;i++){const d=a[i]-a[i-1],up=Math.max(d,0),dn=Math.max(-d,0);
+    if(i<=n){g+=up;l+=dn;if(i===n){g/=n;l/=n;o[i]=100-100/(1+g/(l||1e-9))}}
+    else{g=(g*(n-1)+up)/n;l=(l*(n-1)+dn)/n;o[i]=100-100/(1+g/(l||1e-9))}}return o}
+function backtest(bars,sig,fee){
+  let cash=10000,qty=0,pend=null,ent=null;const trades=[],eq=[];
+  for(let i=0;i<bars.length;i++){const b=bars[i];
+    if(pend==='enter'&&qty===0){qty=cash*(1-fee)/b.open;cash=0;ent={t:b.time,px:b.open,i}}
+    else if(pend==='exit'&&qty>0){cash=qty*b.open*(1-fee);trades.push({t0:ent.t,t1:b.time,p0:ent.px,p1:b.open,ret:b.open/ent.px*(1-fee)*(1-fee)-1,bars:i-ent.i});qty=0}
+    pend=null;eq.push(cash+qty*b.close);
+    const s=sig(i);if(s==='enter'&&qty===0)pend='enter';else if(s==='exit'&&qty>0)pend='exit';}
+  return{trades,eq,open:qty>0?ent:null};
+}
+let charts=[],BARS=[],LIVE=null,SAVED=null,STATUS="",ws=null,poll=null;
+const IV={60:'1m',300:'5m',900:'15m',3600:'1h',14400:'4h',86400:'1d'};
+async function getMT5(n){const r=await fetch(`${$('url').value.replace(/\/$/,'')}/candles?symbol=${$('symtxt').value.trim()}&tf=${$('tf').value}&n=${n}`,{headers:{'x-token':$('tok').value}});if(!r.ok)throw new Error('Backend replied '+r.status);return r.json()}
+function onBar(b){const L=BARS[BARS.length-1];if(!L)return;
+  if(b.time===L.time){BARS[BARS.length-1]=b;LIVE&&LIVE.update(b)}else if(b.time>L.time){BARS.push(b);render()}}
+async function loadBars(){
+  if(ws){ws.onclose=null;ws.close();ws=null}if(poll){clearInterval(poll);poll=null}
+  const src=$('src').value,tf=+$('tf').value,sym=$('symtxt').value.trim().toUpperCase();
+  try{
+    if(src==='sim'){BARS=gen(+$('sym').value,tf,700);STATUS='simulated'}
+    else if(src==='binance'){
+      const r=await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=${IV[tf]}&limit=1000`),k=await r.json();
+      if(!Array.isArray(k))throw new Error(k.msg||'Unknown symbol');
+      BARS=k.map(x=>({time:x[0]/1000,open:+x[1],high:+x[2],low:+x[3],close:+x[4],v:+x[5]}));
+      ws=new WebSocket(`wss://data-stream.binance.vision/ws/${sym.toLowerCase()}@kline_${IV[tf]}`);
+      ws.onmessage=e=>{const k=JSON.parse(e.data).k;onBar({time:k.t/1000,open:+k.o,high:+k.h,low:+k.l,close:+k.c,v:+k.v})};
+      ws.onclose=()=>{STATUS='feed closed, press Run'};STATUS='live · Binance';
+    }else{
+      BARS=await getMT5(1500);STATUS='live · MT5';
+      poll=setInterval(async()=>{try{(await getMT5(2)).forEach(onBar)}catch(e){}},2000);
+    }
+  }catch(e){BARS=[];$('stats').innerHTML='<div class="stat"><b class="neg">Could not load data</b><span>'+e.message+'</span></div>'}
+}
+async function run(){await loadBars();SAVED=null;charts.forEach(c=>c.remove());charts=[];if(BARS.length)render()}
+function srcChange(){const s=$('src').value;$('wsim').style.display=s==='sim'?'':'none';$('symtxt').parentElement.style.display=s==='sim'?'none':'';
+  $('wurl').style.display=$('wtok').style.display=s==='mt5'?'':'none';
+  if(s==='binance')$('symtxt').value='BTCUSDT';if(s==='mt5')$('symtxt').value='XAUUSD';run()}
+function render(){
+  const keep=charts.length?charts[0].timeScale().getVisibleLogicalRange():null;if(keep)SAVED=keep;
+  charts.forEach(c=>c.remove());charts=[];
+  const st=$('strat').value,tf=+$('tf').value,p1=+$('p1').value,p2=+$('p2').value,p3=+$('p3').value,fee=(+$('fee').value||0)/1e4;
+  const bars=BARS,cl=bars.map(b=>b.close);
+  const css=getComputedStyle(document.documentElement),V=k=>css.getPropertyValue(k).trim();
+  const up=V('--up'),dn=V('--down'),acc=V('--acc'),acc2=V('--acc2');
+  const mk=(el,h)=>{const c=LightweightCharts.createChart($(el),{autoSize:true,layout:{background:{color:'transparent'},textColor:V('--muted')},grid:{vertLines:{color:V('--grid')},horzLines:{color:V('--grid')}},rightPriceScale:{borderColor:V('--grid')},timeScale:{borderColor:V('--grid'),timeVisible:tf<86400},crosshair:{mode:0}});charts.push(c);return c};
+  const line=(c,arr,color,w=1)=>{const s=c.addLineSeries({color,lineWidth:w,priceLineVisible:false,lastValueVisible:false});s.setData(arr.map((v,i)=>v==null?null:{time:bars[i].time,value:v}).filter(Boolean));return s};
+  const pc=mk('price');
+  const cs=pc.addCandlestickSeries({upColor:up,downColor:dn,borderUpColor:up,borderDownColor:dn,wickUpColor:up,wickDownColor:dn});
+  cs.setData(bars);LIVE=cs;
+  const vs=pc.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'vol',color:V('--grid')});
+  vs.priceScale().applyOptions({scaleMargins:{top:0.82,bottom:0}});
+  vs.setData(bars.map(b=>({time:b.time,value:b.v,color:b.close>=b.open?up+'55':dn+'55'})));
+  const R=rsi(cl,st==='rsi'?p1:14);let sig,tag='';
+  if(st==='sma'){const f=sma(cl,p1),s=sma(cl,p2);line(pc,f,acc,2);line(pc,s,acc2,2);tag=`SMA ${p1} / ${p2}`;
+    sig=i=>{if(i<1||s[i]==null||s[i-1]==null)return null;if(f[i]>s[i]&&f[i-1]<=s[i-1])return'enter';if(f[i]<s[i]&&f[i-1]>=s[i-1])return'exit'}}
+  else if(st==='rsi'){tag=`RSI(${p1}) buy<${p2}, exit>${p3}`;sig=i=>R[i]==null?null:R[i]<p2?'enter':R[i]>p3?'exit':null}
+  else{const m=sma(cl,p1),sd=std(cl,p1),u=m.map((x,i)=>x==null?null:x+p2*sd[i]),l=m.map((x,i)=>x==null?null:x-p2*sd[i]);
+    line(pc,u,acc,1);line(pc,l,acc,1);line(pc,m,acc2,1);tag=`Bollinger ${p1}, ${p2}σ`;
+    sig=i=>m[i]==null?null:cl[i]<l[i]?'enter':cl[i]>m[i]?'exit':null}
+  const res=backtest(bars,sig,fee);
+  $('ptag').textContent=($('src').value==='sim'?$('sym').selectedOptions[0].text:$('symtxt').value.toUpperCase())+' · '+$('tf').selectedOptions[0].text+' · '+tag+' · '+STATUS;
+  const mks=[];res.trades.forEach(t=>{mks.push({time:t.t0,position:'belowBar',color:up,shape:'arrowUp',text:'B'});mks.push({time:t.t1,position:'aboveBar',color:dn,shape:'arrowDown',text:'S'})});
+  if(res.open)mks.push({time:res.open.t,position:'belowBar',color:up,shape:'arrowUp',text:'B'});
+  mks.sort((a,b)=>a.time-b.time);cs.setMarkers(mks);
+  const rc=mk('rsi');line(rc,R,acc,2);
+  const rl=rc.addLineSeries({color:'transparent',lastValueVisible:false,priceLineVisible:false});rl.setData(bars.map(b=>({time:b.time,value:50})));
+  [30,70].forEach(v=>rl.createPriceLine({price:v,color:V('--muted'),lineStyle:2,lineWidth:1,axisLabelVisible:true,title:''}));
+  const ec=mk('eq');line(ec,res.eq,acc,2);line(ec,cl.map(c=>10000*c/cl[0]),V('--muted'),1);
+  // sync time scales
+  let lock=false;
+  charts.forEach(c=>c.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(lock||!r)return;lock=true;charts.forEach(o=>{if(o!==c)o.timeScale().setVisibleLogicalRange(r)});lock=false}));
+  pc.timeScale().setVisibleLogicalRange(SAVED||{from:bars.length-180,to:bars.length+5});
+  // stats
+  const eq=res.eq,tr=eq[eq.length-1]/10000-1,bh=cl[cl.length-1]/cl[0]-1;
+  let pk=0,dd=0;eq.forEach(e=>{pk=Math.max(pk,e);dd=Math.min(dd,e/pk-1)});
+  const rets=eq.slice(1).map((e,i)=>e/eq[i]-1),mu=rets.reduce((a,b)=>a+b,0)/rets.length,sd=Math.sqrt(rets.reduce((a,b)=>a+(b-mu)**2,0)/rets.length);
+  const sh=sd?mu/sd*Math.sqrt(365*86400/tf):0,wins=res.trades.filter(t=>t.ret>0).length;
+  const pct=x=>(x*100).toFixed(1)+'%',cls=x=>x>=0?'pos':'neg';
+  const S=[['Strategy return',pct(tr),cls(tr)],['Buy & hold',pct(bh),cls(bh)],['Max drawdown',pct(dd),'neg'],['Sharpe (ann.)',sh.toFixed(2),cls(sh)],['Trades',res.trades.length,''],['Win rate',res.trades.length?pct(wins/res.trades.length):'–','']];
+  $('stats').innerHTML=S.map(s=>`<div class="stat"><b class="${s[2]}">${s[1]}</b><span>${s[0]}</span></div>`).join('');
+  const fmt=t=>new Date(t*1000).toISOString().slice(0,tf<86400?16:10).replace('T',' ');
+  $('trades').innerHTML='<tr><th>Entry</th><th>Exit</th><th>Entry px</th><th>Exit px</th><th>Bars</th><th>Return</th></tr>'+
+    res.trades.slice(-15).reverse().map(t=>`<tr><td>${fmt(t.t0)}</td><td>${fmt(t.t1)}</td><td>${t.p0.toFixed(2)}</td><td>${t.p1.toFixed(2)}</td><td>${t.bars}</td><td class="${cls(t.ret)}">${pct(t.ret)}</td></tr>`).join('');
+}
+function setDefaults(){const d=DEF[$('strat').value];
+  [1,2,3].forEach(k=>{const lab=d.l[k-1];$('w3').style.display=(k===3&&!lab)?'none':'';if(lab){$('l'+k).textContent=lab}$('p'+k).value=d.v[k-1]});
+  $('w3').style.display=d.l[2]?'':'none'}
+$('strat').onchange=()=>{setDefaults();render()};
+['sym','tf','symtxt'].forEach(i=>$(i).onchange=run);$('src').onchange=srcChange;$('run').onclick=()=>BARS.length?render():run();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',render);
+setDefaults();srcChange();
+</script>
+</body>
+</html>
